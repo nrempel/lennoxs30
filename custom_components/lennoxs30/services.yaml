@@ -21,3 +21,127 @@ set_zonetest_parameter:
       required: true
       selector:
         boolean:
+
+set_schedule_period:
+  name: Set Schedule Period
+  description: Updates one period in a Lennox schedule/preset. Use with care; this changes thermostat schedule configuration.
+  fields:
+    entry_id:
+      name: Config entry ID
+      description: Optional Lennox integration config entry ID; required only when multiple entries exist.
+      required: false
+      selector:
+        text:
+    system_id:
+      name: System ID
+      description: Optional Lennox system ID; required only when multiple systems exist.
+      required: false
+      selector:
+        text:
+    schedule:
+      name: Schedule name
+      description: Schedule/preset name, for example summer, winter, spring/fall, or save energy. Use either schedule or schedule_id.
+      required: false
+      selector:
+        text:
+    schedule_id:
+      name: Schedule ID
+      description: Numeric schedule ID. Use either schedule or schedule_id.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 15
+          mode: box
+    period:
+      name: Period ID
+      description: Schedule period ID to update.
+      required: true
+      selector:
+        number:
+          min: 0
+          max: 23
+          mode: box
+    enabled:
+      name: Enabled
+      description: Whether this schedule period is enabled.
+      required: false
+      selector:
+        boolean:
+    start_time:
+      name: Start time
+      description: Period start time in seconds after midnight.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 86399
+          unit_of_measurement: sec
+          mode: box
+    system_mode:
+      name: System mode
+      description: HVAC mode for this period.
+      required: false
+      selector:
+        select:
+          options:
+            - "off"
+            - "cool"
+            - "heat"
+            - "heat and cool"
+            - "heat_cool"
+    heat_setpoint:
+      name: Heat setpoint
+      required: false
+      selector:
+        number:
+          min: 40
+          max: 90
+          unit_of_measurement: °F
+    cool_setpoint:
+      name: Cool setpoint
+      required: false
+      selector:
+        number:
+          min: 40
+          max: 99
+          unit_of_measurement: °F
+    setpoint:
+      name: Single setpoint
+      description: Perfect Temp/single-setpoint mode setpoint.
+      required: false
+      selector:
+        number:
+          min: 40
+          max: 99
+          unit_of_measurement: °F
+    fan_mode:
+      name: Fan mode
+      required: false
+      selector:
+        select:
+          options:
+            - "auto"
+            - "on"
+            - "circulate"
+    humidity_mode:
+      name: Humidity mode
+      required: false
+      selector:
+        text:
+    humidify_setpoint:
+      name: Humidify setpoint
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"
+    dehumidify_setpoint:
+      name: Dehumidify setpoint
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 100
+          unit_of_measurement: "%"

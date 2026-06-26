@@ -22,6 +22,7 @@ from homeassistant.const import (
     UnitOfFrequency,
     UnitOfPower,
     UnitOfTemperature,
+    UnitOfVolumeFlowRate,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
@@ -119,6 +120,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                     sensor_list.append(wt_sensor)
 
         if manager.create_sensors:
+            sensor_list.extend(
+                [
+                    S30EquipmentInventorySensor(hass, manager, system),
+                    S30EquipmentParameterInventorySensor(hass, manager, system),
+                    S30ScheduleInventorySensor(hass, manager, system),
+                    S30HeatPumpDiagnosticsSensor(hass, manager, system),
+                    S30AirHandlerDiagnosticsSensor(hass, manager, system),
+                    S30AirflowHealthSensor(hass, manager, system),
+                    S30AirHandlerBlowerCFMDemandSensor(hass, manager, system),
+                    S30AirHandlerBlowerRPMSensor(hass, manager, system),
+                    S30AirHandlerBlowerPowerSensor(hass, manager, system),
+                    S30AirHandlerDischargeAirTemperatureSensor(hass, manager, system),
+                    S30HeatPumpCoolingRateSensor(hass, manager, system),
+                    S30HeatPumpHeatingRateSensor(hass, manager, system),
+                    S30HumidityIntelligenceSensor(hass, manager, system),
+                ]
+            )
             for zone in system.zone_list:
                 if zone.is_zone_active():
                     _LOGGER.debug("Create S30TempSensor sensor system [%s] zone [%s]", system.sysId, zone.id)
@@ -178,6 +196,465 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         async_add_entities(sensor_list, True)
         return True
     return False
+
+
+def _system_name(system: lennox_system) -> str:
+    """Return a safe system name for entity names."""
+    return system.name or "lennox"
+
+
+def _safe_float(value) -> float | None:
+    """Convert numeric Lennox strings to floats, ignoring placeholders."""
+    if value in (None, "", "waiting..."):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _diagnostic_map(equipment: lennox_equipment | None) -> dict[str, Any]:
+    """Serialize existing diagnostic values for one equipment object."""
+    if equipment is None:
+        return {}
+    result: dict[str, Any] = {}
+    for diagnostic_id, diagnostic in sorted(equipment.diagnostics.items()):
+        if diagnostic.valid is False:
+            continue
+        result[str(diagnostic_id)] = {
+            "name": diagnostic.name,
+            "value": None if diagnostic.value == "waiting..." else diagnostic.value,
+            "unit": diagnostic.unit,
+            "waiting": diagnostic.value == "waiting...",
+        }
+    return result
+
+
+def _parameter_map(equipment: lennox_equipment | None) -> list[dict[str, Any]]:
+    """Serialize equipment parameters without exposing write controls."""
+    if equipment is None:
+        return []
+    params = []
+    for _, parameter in sorted(equipment.parameters.items()):
+        params.append(
+            {
+                "parameter_id": parameter.pid,
+                "name": parameter.name,
+                "value": parameter.value,
+                "unit": parameter.unit,
+                "enabled": parameter.enabled,
+                "descriptor": parameter.descriptor,
+                "range_min": parameter.range_min,
+                "range_max": parameter.range_max,
+                "range_inc": parameter.range_inc,
+                "radio": parameter.radio,
+            }
+        )
+    return params
+
+
+class S30ReadOnlyContextSensor(S30BaseEntityMixin, SensorEntity):
+    """Base class for read-only context sensors."""
+
+    _suffix = "RO"
+    _label = "read_only_context"
+
+    def __init__(self, hass: HomeAssistant, manager: Manager, system: lennox_system):
+        super().__init__(manager, system)
+        self._hass = hass
+        self._myname = f"{_system_name(system)}_{self._label}"
+
+    async def async_added_to_hass(self) -> None:
+        """Run when entity is added to hass."""
+        self._system.registerOnUpdateCallback(self.update_callback, [])
+        await super().async_added_to_hass()
+
+    def update_callback(self, *args) -> None:
+        """Callback to execute on data change."""
+        self.schedule_update_ha_state()
+
+    @property
+    def unique_id(self) -> str:
+        return helper_create_system_unique_id(self._system, self._suffix)
+
+    @property
+    def name(self):
+        return self._myname
+
+    @property
+    def entity_category(self):
+        return EntityCategory.DIAGNOSTIC
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return helper_get_equipment_device_info(self._manager, self._system, 0)
+
+
+class S30EquipmentInventorySensor(S30ReadOnlyContextSensor):
+    """Read-only equipment inventory."""
+
+    _suffix = "_RO_EQUIPMENT_INVENTORY"
+    _label = "equipment_inventory"
+
+    @property
+    def native_value(self):
+        return len(self._system.equipment)
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "read_only": True,
+            "equipment": [
+                {
+                    "equipment_id": equipment.equipment_id,
+                    "name": equipment.equipment_name,
+                    "type": equipment.equipment_type_name,
+                    "type_id": equipment.equipType,
+                    "model": equipment.unit_model_number,
+                    "serial_present": equipment.unit_serial_number is not None,
+                    "diagnostics_count": len(equipment.diagnostics),
+                    "parameters_count": len(equipment.parameters),
+                }
+                for _, equipment in sorted(self._system.equipment.items())
+            ],
+        }
+
+
+class S30EquipmentParameterInventorySensor(S30ReadOnlyContextSensor):
+    """Read-only equipment parameter inventory."""
+
+    _suffix = "_RO_PARAMETER_INVENTORY"
+    _label = "equipment_parameter_inventory"
+
+    @property
+    def native_value(self):
+        return sum(1 for equipment in self._system.equipment.values() for parameter in equipment.parameters.values() if parameter.enabled)
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "read_only": True,
+            "writes_to_thermostat": False,
+            "note": "parameter_safety_switch_required_for_writes; this entity only reports current parameter values",
+            "equipment_parameters": [
+                {
+                    "equipment_id": equipment.equipment_id,
+                    "equipment_name": equipment.equipment_name,
+                    "equipment_type": equipment.equipment_type_name,
+                    "parameters": _parameter_map(equipment),
+                }
+                for _, equipment in sorted(self._system.equipment.items())
+            ],
+        }
+
+
+class S30ScheduleInventorySensor(S30ReadOnlyContextSensor):
+    """Read-only schedule/period inventory."""
+
+    _suffix = "_RO_SCHEDULE_INVENTORY"
+    _label = "schedule_inventory"
+
+    @property
+    def native_value(self):
+        return len(self._system.getSchedules())
+
+    @property
+    def extra_state_attributes(self):
+        schedules = []
+        for schedule in self._system.getSchedules():
+            periods = []
+            for period in schedule._periods:
+                periods.append(
+                    {
+                        "period_id": period.id,
+                        "enabled": period.enabled,
+                        "start_time": period.startTime,
+                        "system_mode": period.systemMode,
+                        "heat_setpoint": period.hsp,
+                        "cool_setpoint": period.csp,
+                        "setpoint": period.sp,
+                        "humidity_mode": period.humidityMode,
+                        "humidify_setpoint": period.husp,
+                        "dehumidify_setpoint": period.desp,
+                        "fan_mode": period.fanMode,
+                    }
+                )
+            schedules.append({"schedule_id": schedule.id, "name": schedule.name, "period_count": schedule.periodCount, "periods": periods})
+        return {"read_only": True, "schedules": schedules}
+
+
+class S30HeatPumpDiagnosticsSensor(S30ReadOnlyContextSensor):
+    """Read-only heat pump diagnostic summary."""
+
+    _suffix = "_RO_HEAT_PUMP_DIAGNOSTICS"
+    _label = "heat_pump_diagnostics"
+
+    def _outdoor_equipment(self):
+        return self._system.get_outdoor_unit_equipment() or self._system.equipment.get(1)
+
+    @property
+    def native_value(self):
+        equipment = self._outdoor_equipment()
+        diagnostics = _diagnostic_map(equipment)
+        if not diagnostics:
+            return "unavailable"
+        if any(item["waiting"] for item in diagnostics.values()):
+            return "waiting"
+        return "ok"
+
+    @property
+    def extra_state_attributes(self):
+        equipment = self._outdoor_equipment()
+        return {
+            "read_only": True,
+            "equipment_id": None if equipment is None else equipment.equipment_id,
+            "equipment_name": None if equipment is None else equipment.equipment_name,
+            "equipment_type": None if equipment is None else equipment.equipment_type_name,
+            "model": None if equipment is None else equipment.unit_model_number,
+            "diagnostics": _diagnostic_map(equipment),
+        }
+
+
+class S30AirHandlerDiagnosticsSensor(S30ReadOnlyContextSensor):
+    """Read-only air handler diagnostic summary."""
+
+    _suffix = "_RO_AIR_HANDLER_DIAGNOSTICS"
+    _label = "air_handler_diagnostics"
+
+    def _indoor_equipment(self):
+        return self._system.get_indoor_unit_equipment() or self._system.equipment.get(2)
+
+    @property
+    def native_value(self):
+        equipment = self._indoor_equipment()
+        diagnostics = _diagnostic_map(equipment)
+        if not diagnostics:
+            return "unavailable"
+        if any(item["waiting"] for item in diagnostics.values()):
+            return "waiting"
+        return "ok"
+
+    @property
+    def extra_state_attributes(self):
+        equipment = self._indoor_equipment()
+        return {
+            "read_only": True,
+            "equipment_id": None if equipment is None else equipment.equipment_id,
+            "equipment_name": None if equipment is None else equipment.equipment_name,
+            "equipment_type": None if equipment is None else equipment.equipment_type_name,
+            "model": None if equipment is None else equipment.unit_model_number,
+            "diagnostics": _diagnostic_map(equipment),
+        }
+
+
+class S30AirflowHealthSensor(S30ReadOnlyContextSensor):
+    """Read-only airflow/filter health summary derived from existing diagnostics."""
+
+    _suffix = "_RO_AIRFLOW_HEALTH"
+    _label = "airflow_health"
+
+    def _diagnostic_by_name(self, names: tuple[str, ...]):
+        equipment = self._system.get_indoor_unit_equipment() or self._system.equipment.get(2)
+        if equipment is None:
+            return None
+        for diagnostic in equipment.diagnostics.values():
+            if diagnostic.name in names:
+                return diagnostic.value
+        return None
+
+    @property
+    def native_value(self):
+        values = [
+            self._diagnostic_by_name(("Blower CFM Demand",)),
+            self._diagnostic_by_name(("Indoor Blower RPM",)),
+            self._diagnostic_by_name(("Indoor Blower Power",)),
+        ]
+        if all(value in (None, "waiting...") for value in values):
+            return "waiting"
+        return "ok"
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "read_only": True,
+            "writes_to_thermostat": False,
+            "blower_cfm_demand": self._diagnostic_by_name(("Blower CFM Demand",)),
+            "indoor_blower_rpm": self._diagnostic_by_name(("Indoor Blower RPM",)),
+            "indoor_blower_power": self._diagnostic_by_name(("Indoor Blower Power",)),
+            "discharge_air_temperature": self._diagnostic_by_name(("Discharge Air Temperature",)),
+            "line_voltage": self._diagnostic_by_name(("Line Voltage",)),
+            "low_airflow_hint": "compare CFM demand, RPM, and blower power trends against a clean-filter baseline",
+        }
+
+
+class S30NamedDiagnosticSensor(S30ReadOnlyContextSensor):
+    """Dedicated read-only sensor for one named equipment diagnostic."""
+
+    _label = "diagnostic"
+    _suffix = "_RO_DIAGNOSTIC"
+    _equipment_id = 0
+    _diagnostic_names: tuple[str, ...] = ()
+    _unit = None
+    _device_class = None
+
+    def _equipment(self):
+        return self._system.equipment.get(self._equipment_id)
+
+    def _diagnostic(self):
+        equipment = self._equipment()
+        if equipment is None:
+            return None
+        for diagnostic in equipment.diagnostics.values():
+            if diagnostic.name in self._diagnostic_names:
+                return diagnostic
+        return None
+
+    @property
+    def available(self):
+        diagnostic = self._diagnostic()
+        if diagnostic is None or diagnostic.value == "waiting..." or diagnostic.valid is False:
+            return False
+        return super().available
+
+    @property
+    def native_value(self):
+        diagnostic = self._diagnostic()
+        if diagnostic is None or diagnostic.value == "waiting...":
+            return None
+        numeric = _safe_float(diagnostic.value)
+        return numeric if numeric is not None else diagnostic.value
+
+    @property
+    def native_unit_of_measurement(self):
+        return self._unit
+
+    @property
+    def device_class(self):
+        return self._device_class
+
+    @property
+    def state_class(self):
+        return SensorStateClass.MEASUREMENT if self._unit is not None else None
+
+    @property
+    def extra_state_attributes(self):
+        diagnostic = self._diagnostic()
+        equipment = self._equipment()
+        return {
+            "read_only": True,
+            "writes_to_thermostat": False,
+            "equipment_id": self._equipment_id,
+            "equipment_name": None if equipment is None else equipment.equipment_name,
+            "diagnostic_id": None if diagnostic is None else diagnostic.diagnostic_id,
+            "diagnostic_name": None if diagnostic is None else diagnostic.name,
+            "raw_value": None if diagnostic is None else diagnostic.value,
+        }
+
+
+class S30AirHandlerBlowerCFMDemandSensor(S30NamedDiagnosticSensor):
+    """Dedicated blower CFM demand sensor."""
+
+    _suffix = "_RO_AH_BLOWER_CFM_DEMAND"
+    _label = "air_handler_blower_cfm_demand"
+    _equipment_id = 2
+    _diagnostic_names = ("Blower CFM Demand",)
+    _unit = UnitOfVolumeFlowRate.CUBIC_FEET_PER_MINUTE
+
+
+class S30AirHandlerBlowerRPMSensor(S30NamedDiagnosticSensor):
+    """Dedicated indoor blower RPM sensor."""
+
+    _suffix = "_RO_AH_BLOWER_RPM"
+    _label = "air_handler_blower_rpm"
+    _equipment_id = 2
+    _diagnostic_names = ("Indoor Blower RPM",)
+    _unit = REVOLUTIONS_PER_MINUTE
+
+
+class S30AirHandlerBlowerPowerSensor(S30NamedDiagnosticSensor):
+    """Dedicated indoor blower power sensor."""
+
+    _suffix = "_RO_AH_BLOWER_POWER"
+    _label = "air_handler_blower_power"
+    _equipment_id = 2
+    _diagnostic_names = ("Indoor Blower Power",)
+    _unit = PERCENTAGE
+
+
+class S30AirHandlerDischargeAirTemperatureSensor(S30NamedDiagnosticSensor):
+    """Dedicated discharge air temperature sensor."""
+
+    _suffix = "_RO_AH_DISCHARGE_AIR_TEMPERATURE"
+    _label = "air_handler_discharge_air_temperature"
+    _equipment_id = 2
+    _diagnostic_names = ("Discharge Air Temperature",)
+    _unit = UnitOfTemperature.FAHRENHEIT
+    _device_class = SensorDeviceClass.TEMPERATURE
+
+
+class S30HeatPumpCoolingRateSensor(S30NamedDiagnosticSensor):
+    """Dedicated heat pump cooling rate sensor."""
+
+    _suffix = "_RO_HP_COOLING_RATE"
+    _label = "heat_pump_cooling_rate"
+    _equipment_id = 1
+    _diagnostic_names = ("Cooling Rate",)
+    _unit = PERCENTAGE
+
+
+class S30HeatPumpHeatingRateSensor(S30NamedDiagnosticSensor):
+    """Dedicated heat pump heating rate sensor."""
+
+    _suffix = "_RO_HP_HEATING_RATE"
+    _label = "heat_pump_heating_rate"
+    _equipment_id = 1
+    _diagnostic_names = ("Heating Rate",)
+    _unit = PERCENTAGE
+
+
+class S30HumidityIntelligenceSensor(S30ReadOnlyContextSensor):
+    """Read-only humidity/dehumidification comfort summary."""
+
+    _suffix = "_RO_HUMIDITY_INTELLIGENCE"
+    _label = "humidity_intelligence"
+
+    @property
+    def native_value(self):
+        humidities = [_safe_float(zone.getHumidity()) for zone in self._system.zone_list if zone.is_zone_active()]
+        humidities = [value for value in humidities if value is not None]
+        if not humidities:
+            return "unknown"
+        max_humidity = max(humidities)
+        min_humidity = min(humidities)
+        if max_humidity >= 60:
+            return "humid"
+        if min_humidity <= 30:
+            return "dry"
+        return "ok"
+
+    @property
+    def extra_state_attributes(self):
+        return {
+            "read_only": True,
+            "writes_to_thermostat": False,
+            "system_dehumidification_mode": getattr(self._system, "dehumidificationMode", None),
+            "system_humidification_mode": getattr(self._system, "humidificationMode", None),
+            "enhanced_dehumidification_overcooling_f_enabled": getattr(
+                self._system, "enhancedDehumidificationOvercoolingF_enable", None
+            ),
+            "zones": [
+                {
+                    "zone_id": zone.id,
+                    "name": zone.name,
+                    "humidity": zone.getHumidity(),
+                    "humidity_mode": getattr(zone, "humidityMode", None),
+                    "dehumidify_setpoint": getattr(zone, "desp", None),
+                    "humidify_setpoint": getattr(zone, "husp", None),
+                }
+                for zone in self._system.zone_list
+                if zone.is_zone_active()
+            ],
+        }
 
 
 class S30DiagSensor(S30BaseEntityMixin, SensorEntity):

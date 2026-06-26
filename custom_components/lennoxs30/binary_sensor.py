@@ -63,6 +63,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             sensor_list.append(S30HeatpumpLowAmbientLockout(hass, manager, system))
             sensor_list.append(S30AuxheatHighAmbientLockout(hass, manager, system))
 
+        if manager.create_sensors:
+            sensor_list.append(S30HeatPumpShortCycleDelaySensor(hass, manager, system))
+            sensor_list.append(S30HeatPumpDefrostStatusSensor(hass, manager, system))
+
         for ble_device in system.ble_devices.values():
             if ble_device.deviceType == "tstat":
                 continue
@@ -406,6 +410,103 @@ class S30CloudConnectedStatus(S30BaseEntityMixin, BinarySensorEntity):
     def entity_category(self) -> EntityCategory:
         """Return entity_category."""
         return EntityCategory.DIAGNOSTIC
+
+
+class S30NamedDiagnosticBinarySensor(S30BaseEntityMixin, BinarySensorEntity):
+    """Dedicated read-only binary sensor for one named equipment diagnostic."""
+
+    _suffix = "_RO_DIAG_BINARY"
+    _label = "diagnostic_binary"
+    _equipment_id = 1
+    _diagnostic_names: tuple[str, ...] = ()
+    _diagnostic_ids: tuple[int, ...] = ()
+    _on_values = {"yes", "on", "active", "true", "1"}
+
+    def __init__(self, hass: HomeAssistant, manager: Manager, system: lennox_system) -> None:
+        super().__init__(manager, system)
+        self._hass = hass
+        self._myname = (self._system.name or "lennox") + "_" + self._label
+
+    def _equipment(self):
+        return self._system.equipment.get(self._equipment_id)
+
+    def _diagnostic(self):
+        equipment = self._equipment()
+        if equipment is None:
+            return None
+        wanted_ids = {str(item) for item in self._diagnostic_ids}
+        if wanted_ids:
+            for diagnostic in equipment.diagnostics.values():
+                if str(diagnostic.diagnostic_id) in wanted_ids:
+                    return diagnostic
+        for diagnostic in equipment.diagnostics.values():
+            if diagnostic.name in self._diagnostic_names:
+                return diagnostic
+        return None
+
+    @property
+    def unique_id(self) -> str:
+        return (self._system.unique_id + self._suffix).replace("-", "")
+
+    @property
+    def name(self) -> str:
+        return self._myname
+
+    @property
+    def available(self) -> bool:
+        diagnostic = self._diagnostic()
+        if diagnostic is None or diagnostic.value == "waiting..." or diagnostic.valid is False:
+            return False
+        return super().available
+
+    @property
+    def is_on(self) -> bool:
+        diagnostic = self._diagnostic()
+        if diagnostic is None or diagnostic.value is None:
+            return None
+        return str(diagnostic.value).strip().casefold() in self._on_values
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        diagnostic = self._diagnostic()
+        equipment = self._equipment()
+        return {
+            "read_only": True,
+            "writes_to_thermostat": False,
+            "equipment_id": self._equipment_id,
+            "equipment_name": None if equipment is None else equipment.equipment_name,
+            "diagnostic_id": None if diagnostic is None else diagnostic.diagnostic_id,
+            "diagnostic_name": None if diagnostic is None else diagnostic.name,
+            "raw_value": None if diagnostic is None else diagnostic.value,
+        }
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return {
+            "identifiers": {(DOMAIN, self._system.unique_id + "_ou")},
+        }
+
+    @property
+    def entity_category(self) -> EntityCategory:
+        return EntityCategory.DIAGNOSTIC
+
+
+class S30HeatPumpShortCycleDelaySensor(S30NamedDiagnosticBinarySensor):
+    """Compressor short-cycle delay active sensor."""
+
+    _suffix = "_RO_HP_SHORT_CYCLE_DELAY"
+    _label = "heat_pump_short_cycle_delay_active"
+    _diagnostic_names = ("Comp. Short Cycle Delay Active", "Compressor Short Cycle Delay Active")
+    _diagnostic_ids = (0,)
+
+
+class S30HeatPumpDefrostStatusSensor(S30NamedDiagnosticBinarySensor):
+    """Heat pump defrost active sensor."""
+
+    _suffix = "_RO_HP_DEFROST_ACTIVE"
+    _label = "heat_pump_defrost_active"
+    _diagnostic_names = ("Defrost Status",)
+    _diagnostic_ids = (7,)
 
 
 class S30HeatpumpLowAmbientLockout(S30BaseEntityMixin, BinarySensorEntity):

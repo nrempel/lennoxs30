@@ -6,6 +6,7 @@
 # pylint: disable=invalid-name
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -78,6 +79,7 @@ from .util import dict_redact_fields
 
 DOMAIN = LENNOX_DOMAIN
 DOMAIN_STATE = "lennoxs30.state"
+SERVICE_SET_SCHEDULE_PERIOD = "set_schedule_period"
 PLATFORMS = [
     "sensor",
     "climate",
@@ -148,9 +150,135 @@ CONFIG_SCHEMA = vol.Schema(
 _LOGGER = logging.getLogger(__name__)
 
 
+def _service_data(call) -> dict:
+    """Return service call data, accepting dicts for unit tests."""
+    if isinstance(call, dict):
+        return call
+    return call.data
+
+
+def _get_manager_for_service(hass: HomeAssistant, data: dict) -> "Manager":
+    """Resolve a manager for a schedule service call."""
+    entries = hass.data.get(DOMAIN, {})
+    entry_id = data.get("entry_id")
+    if entry_id is not None:
+        if entry_id not in entries:
+            raise HomeAssistantError(f"LennoxS30 entry_id not found [{entry_id}]")
+        return entries[entry_id][MANAGER]
+    if len(entries) == 1:
+        return next(iter(entries.values()))[MANAGER]
+    raise HomeAssistantError("LennoxS30 entry_id is required when multiple entries are configured")
+
+
+def _get_system_for_service(manager: "Manager", data: dict) -> lennox_system:
+    """Resolve a Lennox system for a schedule service call."""
+    system_id = data.get("system_id")
+    if system_id is None:
+        if len(manager.api.system_list) == 1:
+            return manager.api.system_list[0]
+        raise HomeAssistantError("system_id is required when multiple Lennox systems are configured")
+    system = manager.api.getSystem(system_id)
+    if system is None:
+        raise HomeAssistantError(f"LennoxS30 system_id not found [{system_id}]")
+    return system
+
+
+def _get_schedule_id_for_service(system: lennox_system, data: dict) -> int:
+    """Resolve schedule_id from either schedule_id or schedule name."""
+    if data.get("schedule_id") is not None:
+        return int(data["schedule_id"])
+    schedule_name = data.get("schedule")
+    if schedule_name is None:
+        raise HomeAssistantError("schedule or schedule_id is required")
+    for schedule in system.getSchedules():
+        if schedule.name.lower() == schedule_name.lower():
+            return schedule.id
+    raise HomeAssistantError(f"Schedule not found [{schedule_name}]")
+
+
+def _schedule_system_mode(value: str | None) -> str | None:
+    """Map Home Assistant-style modes to Lennox schedule system modes."""
+    if value == "heat_cool":
+        return "heat and cool"
+    return value
+
+
+def _build_schedule_period_update(schedule_id: int, data: dict) -> dict:
+    """Build a Lennox schedule period update payload."""
+    fields = {
+        "startTime": data.get("start_time"),
+        "systemMode": _schedule_system_mode(data.get("system_mode")),
+        "hsp": data.get("heat_setpoint"),
+        "hspC": data.get("heat_setpoint_c"),
+        "csp": data.get("cool_setpoint"),
+        "cspC": data.get("cool_setpoint_c"),
+        "sp": data.get("setpoint"),
+        "spC": data.get("setpoint_c"),
+        "humidityMode": data.get("humidity_mode"),
+        "husp": data.get("humidify_setpoint"),
+        "desp": data.get("dehumidify_setpoint"),
+        "fanMode": data.get("fan_mode"),
+    }
+    period = {key: value for key, value in fields.items() if value is not None}
+    enabled = data.get("enabled")
+    if enabled is None and len(period) == 0:
+        raise HomeAssistantError("enabled or at least one schedule period field must be specified")
+
+    period_update = {"id": int(data["period"]), "period": period}
+    if enabled is not None:
+        period_update["enabled"] = bool(enabled)
+    return {"schedules": [{"id": int(schedule_id), "schedule": {"periods": [period_update]}}]}
+
+
+async def _publish_schedule_period_update(system: lennox_system, schedule_id: int, data: dict) -> None:
+    """Publish a Lennox schedule period update without requiring a patched lennoxs30api."""
+    command = _build_schedule_period_update(schedule_id, data)
+    payload = '"Data":' + json.dumps(command, separators=(",", ":"))
+    await system.api.publishMessageHelper(system.sysId, payload)
+
+
+async def async_set_schedule_period(hass: HomeAssistant, call) -> None:
+    """Handle lennoxs30.set_schedule_period service calls."""
+    data = _service_data(call)
+    manager = _get_manager_for_service(hass, data)
+    system = _get_system_for_service(manager, data)
+    schedule_id = _get_schedule_id_for_service(system, data)
+    try:
+        await _publish_schedule_period_update(system, schedule_id, data)
+    except S30Exception as ex:
+        raise HomeAssistantError(f"set_schedule_period failed [{ex.as_string()}]") from ex
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType):
     """Import config as config entry."""
     hass.data[DOMAIN] = {}
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_SCHEDULE_PERIOD,
+        lambda call: async_set_schedule_period(hass, call),
+        schema=vol.Schema(
+            {
+                vol.Optional("entry_id"): cv.string,
+                vol.Optional("system_id"): cv.string,
+                vol.Optional("schedule"): cv.string,
+                vol.Optional("schedule_id"): cv.positive_int,
+                vol.Required("period"): cv.positive_int,
+                vol.Optional("enabled"): cv.boolean,
+                vol.Optional("start_time"): vol.All(vol.Coerce(int), vol.Range(min=0, max=86399)),
+                vol.Optional("system_mode"): cv.string,
+                vol.Optional("heat_setpoint"): cv.positive_int,
+                vol.Optional("heat_setpoint_c"): cv.positive_float,
+                vol.Optional("cool_setpoint"): cv.positive_int,
+                vol.Optional("cool_setpoint_c"): cv.positive_float,
+                vol.Optional("setpoint"): cv.positive_int,
+                vol.Optional("setpoint_c"): cv.positive_float,
+                vol.Optional("humidity_mode"): cv.string,
+                vol.Optional("humidify_setpoint"): cv.positive_int,
+                vol.Optional("dehumidify_setpoint"): cv.positive_int,
+                vol.Optional("fan_mode"): cv.string,
+            }
+        ),
+    )
     if config.get(DOMAIN) is None:
         return True
 

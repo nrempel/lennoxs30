@@ -17,11 +17,24 @@ from custom_components.lennoxs30 import Manager
 from custom_components.lennoxs30.const import MANAGER
 from custom_components.lennoxs30.sensor import (
     S30ActiveAlertsList,
+    S30AirflowHealthSensor,
+    S30AirHandlerBlowerCFMDemandSensor,
+    S30AirHandlerBlowerPowerSensor,
+    S30AirHandlerBlowerRPMSensor,
+    S30AirHandlerDiagnosticsSensor,
+    S30AirHandlerDischargeAirTemperatureSensor,
     S30AlertSensor,
     S30DiagSensor,
+    S30EquipmentInventorySensor,
+    S30EquipmentParameterInventorySensor,
+    S30HeatPumpCoolingRateSensor,
+    S30HeatPumpDiagnosticsSensor,
+    S30HeatPumpHeatingRateSensor,
+    S30HumidityIntelligenceSensor,
     S30HumiditySensor,
     S30InverterPowerSensor,
     S30OutdoorTempSensor,
+    S30ScheduleInventorySensor,
     S30TempSensor,
     async_setup_entry,
 )
@@ -166,10 +179,23 @@ async def test_async_setup_entry(hass, manager: Manager, caplog):
         await async_setup_entry(hass, entry, async_add_entities)
         assert async_add_entities.called == 1
         sensor_list = async_add_entities.call_args[0][0]
-        assert len(sensor_list) == 2 * system.numberOfZones
+        assert len(sensor_list) == (2 * system.numberOfZones) + 13
+        assert isinstance(sensor_list[0], S30EquipmentInventorySensor)
+        assert isinstance(sensor_list[1], S30EquipmentParameterInventorySensor)
+        assert isinstance(sensor_list[2], S30ScheduleInventorySensor)
+        assert isinstance(sensor_list[3], S30HeatPumpDiagnosticsSensor)
+        assert isinstance(sensor_list[4], S30AirHandlerDiagnosticsSensor)
+        assert isinstance(sensor_list[5], S30AirflowHealthSensor)
+        assert isinstance(sensor_list[6], S30AirHandlerBlowerCFMDemandSensor)
+        assert isinstance(sensor_list[7], S30AirHandlerBlowerRPMSensor)
+        assert isinstance(sensor_list[8], S30AirHandlerBlowerPowerSensor)
+        assert isinstance(sensor_list[9], S30AirHandlerDischargeAirTemperatureSensor)
+        assert isinstance(sensor_list[10], S30HeatPumpCoolingRateSensor)
+        assert isinstance(sensor_list[11], S30HeatPumpHeatingRateSensor)
+        assert isinstance(sensor_list[12], S30HumidityIntelligenceSensor)
         for i in range(system.numberOfZones):
-            assert isinstance(sensor_list[i * 2], S30TempSensor)
-            assert isinstance(sensor_list[(i * 2) + 1], S30HumiditySensor)
+            assert isinstance(sensor_list[13 + (i * 2)], S30TempSensor)
+            assert isinstance(sensor_list[13 + (i * 2) + 1], S30HumiditySensor)
         assert len(caplog.records) == 0
 
     # Diagnostic Sensors
